@@ -2,7 +2,7 @@
 Threat Intelligence Service
 ===========================
 Ingests IOCs from multiple feeds, stores them in the DB, and correlates them
-against internal log data.  AI/NLP enrichment generates plain-English summaries
+against internal log data. AI/NLP enrichment generates plain-English summaries
 analysts can act on immediately.
 
 Feed types supported (all simulated in this prototype):
@@ -20,22 +20,22 @@ import os
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from .database import ThreatIndicator, Log, Incident
+from .database import Incident, ThreatIndicator
 
 logger = logging.getLogger(__name__)
 
-# Docker: __file__ is /backend/app/services/threat_intel.py → parents[3] = /
-# Local:  __file__ is …/ai-soc/backend/app/services/threat_intel.py → parents[3] = ai-soc/
+# Docker: __file__ is /backend/app/services/threat_intel.py -> parents[3] = /
+# Local: __file__ is .../ai-soc/backend/app/services/threat_intel.py -> parents[3] = ai-soc/
 # Both cases: parents[3] / "data" resolves correctly.
 _FEED_DEFAULT = Path(__file__).resolve().parents[3] / "data" / "dummy_threat_feed.json"
 FEED_FILE = Path(os.getenv("FEED_FILE_PATH", str(_FEED_DEFAULT)))
 
 
-# ── NLP enrichment templates ──────────────────────────────────────────────
+# NLP enrichment templates
 # In production replace with an LLM call (Claude / OpenAI) for richer summaries.
 THREAT_TEMPLATES = {
     "malware": (
@@ -77,11 +77,8 @@ THREAT_TEMPLATES = {
 
 
 class ThreatIntelService:
-
     def __init__(self):
-        self._cache: Dict[str, ThreatIndicator] = {}   # value → indicator cache
-
-    # ── Feed ingestion ───────────────────────────────────────────────────────
+        self._cache: Dict[str, Dict[str, Any]] = {}
 
     def load_from_file(self, db: Session) -> int:
         """Load IOCs from the bundled dummy feed JSON. Returns count added."""
@@ -96,17 +93,18 @@ class ThreatIntelService:
         for entry in feed.get("indicators", []):
             if not db.query(ThreatIndicator).filter_by(value=entry["value"]).first():
                 ti = ThreatIndicator(
-                    ioc_type    = entry.get("ioc_type", "ip"),
-                    value       = entry["value"],
-                    threat_type = entry.get("threat_type", "unknown"),
-                    severity    = entry.get("severity", "medium"),
-                    confidence  = entry.get("confidence", 0.7),
-                    feed_source = entry.get("feed_source", "dummy_feed"),
-                    description = entry.get("description", ""),
-                    tags        = entry.get("tags", []),
+                    ioc_type=entry.get("ioc_type", "ip"),
+                    value=entry["value"],
+                    threat_type=entry.get("threat_type", "unknown"),
+                    severity=entry.get("severity", "medium"),
+                    confidence=entry.get("confidence", 0.7),
+                    feed_source=entry.get("feed_source", "dummy_feed"),
+                    description=entry.get("description", ""),
+                    tags=entry.get("tags", []),
                 )
                 db.add(ti)
-                self._cache[ti.value] = ti
+                db.flush()
+                self._cache[ti.value] = self._indicator_to_dict(ti)
                 added += 1
 
         db.commit()
@@ -125,7 +123,8 @@ class ThreatIntelService:
             if not db.query(ThreatIndicator).filter_by(value=ioc["value"]).first():
                 ti = ThreatIndicator(**ioc)
                 db.add(ti)
-                self._cache[ti.value] = ti
+                db.flush()
+                self._cache[ti.value] = self._indicator_to_dict(ti)
                 added.append(ioc)
         db.commit()
         logger.info("Fetched %d new IOCs from simulated feed '%s'", len(added), feed_name)
@@ -135,41 +134,47 @@ class ThreatIntelService:
     def _generate_simulated_iocs(count: int) -> List[Dict]:
         """Generate random but realistic-looking IOC records."""
         threat_types = ["malware", "phishing", "c2", "ransomware", "apt"]
-        ioc_types    = ["ip", "domain", "hash", "url"]
-        feeds        = ["threat_feed_alpha", "threat_feed_beta", "misp_feed", "isac_feed"]
+        ioc_types = ["ip", "domain", "hash", "url"]
+        feeds = ["threat_feed_alpha", "threat_feed_beta", "misp_feed", "isac_feed"]
         iocs = []
         for _ in range(count):
-            t    = random.choice(ioc_types)
-            tt   = random.choice(threat_types)
-            sev  = random.choice(["critical", "high", "medium", "low"])
-            conf = round(random.uniform(0.4, 0.99), 2)
+            ioc_type = random.choice(ioc_types)
+            threat_type = random.choice(threat_types)
+            severity = random.choice(["critical", "high", "medium", "low"])
+            confidence = round(random.uniform(0.4, 0.99), 2)
 
-            if t == "ip":
-                value = f"{random.randint(1,254)}.{random.randint(0,254)}.{random.randint(0,254)}.{random.randint(1,254)}"
-            elif t == "domain":
+            if ioc_type == "ip":
+                value = (
+                    f"{random.randint(1,254)}.{random.randint(0,254)}."
+                    f"{random.randint(0,254)}.{random.randint(1,254)}"
+                )
+            elif ioc_type == "domain":
                 tlds = [".ru", ".cn", ".tk", ".xyz", ".top"]
-                value = f"malicious-{''.join(random.choices('abcdefghijklmnop', k=6))}{random.choice(tlds)}"
-            elif t == "hash":
+                value = (
+                    f"malicious-{''.join(random.choices('abcdefghijklmnop', k=6))}"
+                    f"{random.choice(tlds)}"
+                )
+            elif ioc_type == "hash":
                 value = hashlib.sha256(str(random.random()).encode()).hexdigest()
             else:
                 value = f"http://evil-{''.join(random.choices('abcdefg', k=5))}.xyz/payload"
 
-            iocs.append(dict(
-                ioc_type    = t,
-                value       = value,
-                threat_type = tt,
-                severity    = sev,
-                confidence  = conf,
-                feed_source = random.choice(feeds),
-                description = f"Simulated {tt} indicator",
-                tags        = [tt, t],
-                first_seen  = datetime.utcnow() - timedelta(days=random.randint(0, 30)),
-                last_seen   = datetime.utcnow(),
-                is_active   = True,
-            ))
+            iocs.append(
+                dict(
+                    ioc_type=ioc_type,
+                    value=value,
+                    threat_type=threat_type,
+                    severity=severity,
+                    confidence=confidence,
+                    feed_source=random.choice(feeds),
+                    description=f"Simulated {threat_type} indicator",
+                    tags=[threat_type, ioc_type],
+                    first_seen=datetime.utcnow() - timedelta(days=random.randint(0, 30)),
+                    last_seen=datetime.utcnow(),
+                    is_active=True,
+                )
+            )
         return iocs
-
-    # ── IOC correlation ──────────────────────────────────────────────────────
 
     def correlate_log(self, db: Session, log_dict: Dict[str, Any]) -> List[Dict]:
         """
@@ -178,29 +183,30 @@ class ThreatIntelService:
         """
         candidates = []
         for field in ("ip_src", "ip_dst", "user"):
-            v = log_dict.get(field)
-            if v:
-                candidates.append(str(v))
+            value = log_dict.get(field)
+            if value:
+                candidates.append(str(value))
+
         raw = log_dict.get("raw_data") or {}
         for field in ("domain", "url", "file_hash"):
-            v = raw.get(field)
-            if v:
-                candidates.append(str(v))
+            value = raw.get(field)
+            if value:
+                candidates.append(str(value))
 
         matches = []
-        for val in candidates:
-            # First check in-memory cache
-            if val in self._cache:
-                matches.append(self._indicator_to_dict(self._cache[val]))
+        for value in candidates:
+            if value in self._cache:
+                matches.append(dict(self._cache[value]))
                 continue
-            # Fall back to DB query
+
             ti = db.query(ThreatIndicator).filter(
-                ThreatIndicator.value == val,
-                ThreatIndicator.is_active == True
+                ThreatIndicator.value == value,
+                ThreatIndicator.is_active.is_(True),
             ).first()
             if ti:
-                self._cache[val] = ti
-                matches.append(self._indicator_to_dict(ti))
+                indicator_dict = self._indicator_to_dict(ti)
+                self._cache[value] = indicator_dict
+                matches.append(indicator_dict)
 
         return matches
 
@@ -209,38 +215,32 @@ class ThreatIntelService:
         matches = []
         if incident.trigger_log:
             log_dict = {
-                "ip_src":    incident.trigger_log.ip_src,
-                "ip_dst":    incident.trigger_log.ip_dst,
-                "user":      incident.trigger_log.user,
-                "raw_data":  incident.trigger_log.raw_data,
+                "ip_src": incident.trigger_log.ip_src,
+                "ip_dst": incident.trigger_log.ip_dst,
+                "user": incident.trigger_log.user,
+                "raw_data": incident.trigger_log.raw_data,
             }
             matches = self.correlate_log(db, log_dict)
         return matches
 
-    # ── AI enrichment ────────────────────────────────────────────────────────
-
     def enrich_indicator(self, indicator: Dict[str, Any]) -> str:
         """
         Generate a plain-English threat summary using template-based NLP.
-        In production swap this for a Claude/OpenAI API call:
-            response = anthropic.messages.create(
-                model="claude-opus-4-6",
-                messages=[{"role":"user","content": f"Summarise this IOC: {indicator}"}]
-            )
+        In production swap this for a Claude/OpenAI API call.
         """
         threat_type = indicator.get("threat_type", "default")
-        template    = THREAT_TEMPLATES.get(threat_type, THREAT_TEMPLATES["default"])
-        behaviors   = {
-            "malware":    "file encryption and credential stealing",
-            "phishing":   "spoofed login pages and email lures",
-            "c2":         "HTTP/S beaconing every 30-300 seconds",
+        template = THREAT_TEMPLATES.get(threat_type, THREAT_TEMPLATES["default"])
+        behaviors = {
+            "malware": "file encryption and credential stealing",
+            "phishing": "spoofed login pages and email lures",
+            "c2": "HTTP/S beaconing every 30-300 seconds",
             "ransomware": "rapid file enumeration and AES encryption",
-            "apt":        "spear-phishing followed by living-off-the-land persistence",
-            "default":    "network scanning and exploitation attempts",
+            "apt": "spear-phishing followed by living-off-the-land persistence",
+            "default": "network scanning and exploitation attempts",
         }
         return template.format(
-            name     = indicator.get("value", "unknown"),
-            behavior = behaviors.get(threat_type, behaviors["default"]),
+            name=indicator.get("value", "unknown"),
+            behavior=behaviors.get(threat_type, behaviors["default"]),
         )
 
     def generate_threat_summary(self, db: Session) -> Dict[str, Any]:
@@ -249,29 +249,27 @@ class ThreatIntelService:
         Aggregates active IOC counts by type/severity and generates narrative.
         """
         indicators = db.query(ThreatIndicator).filter_by(is_active=True).all()
-        by_sev  = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-        by_type = {}
-        for ti in indicators:
-            by_sev[ti.severity]               = by_sev.get(ti.severity, 0) + 1
-            by_type[ti.threat_type]           = by_type.get(ti.threat_type, 0) + 1
+        by_severity = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        by_type: Dict[str, int] = {}
+        for indicator in indicators:
+            by_severity[indicator.severity] = by_severity.get(indicator.severity, 0) + 1
+            by_type[indicator.threat_type] = by_type.get(indicator.threat_type, 0) + 1
 
         top_threat = max(by_type, key=by_type.get) if by_type else "none"
-        narrative  = (
+        narrative = (
             f"Threat landscape: {len(indicators)} active IOCs across "
             f"{len(by_type)} threat categories. "
             f"Top threat type: {top_threat} ({by_type.get(top_threat, 0)} IOCs). "
             f"Critical/High IOCs requiring immediate action: "
-            f"{by_sev['critical'] + by_sev['high']}."
+            f"{by_severity['critical'] + by_severity['high']}."
         )
         return {
-            "total_iocs":     len(indicators),
-            "by_severity":    by_sev,
+            "total_iocs": len(indicators),
+            "by_severity": by_severity,
             "by_threat_type": by_type,
-            "narrative":      narrative,
-            "generated_at":   datetime.utcnow().isoformat(),
+            "narrative": narrative,
+            "generated_at": datetime.utcnow().isoformat(),
         }
-
-    # ── AI recommendation engine ─────────────────────────────────────────────
 
     def generate_ai_recommendation(
         self,
@@ -284,26 +282,23 @@ class ThreatIntelService:
         """
         Rule-based AI recommendation for analysts.
         Produce prioritised, actionable guidance based on incident context.
-
-        In production: call Claude API with full incident context for richer output.
         """
-        lines = [f"AI Analysis — {incident_title}", ""]
+        lines = [f"AI Analysis - {incident_title}", ""]
 
-        # Risk context
         lines.append(f"Risk Score: {risk_score}/100 | Severity: {severity.upper()}")
         if explanation:
             lines.append(f"Detection reason: {explanation}")
         lines.append("")
 
-        # IOC context
         if ioc_matches:
             lines.append(f"Threat Intel Match: {len(ioc_matches)} known IOC(s) correlated.")
-            for m in ioc_matches[:3]:
-                lines.append(f"  • [{m['threat_type'].upper()}] {m['value']} "
-                              f"(confidence: {m['confidence']:.0%}) — {m['feed_source']}")
+            for match in ioc_matches[:3]:
+                lines.append(
+                    f"  - [{match['threat_type'].upper()}] {match['value']} "
+                    f"(confidence: {match['confidence']:.0%}) - {match['feed_source']}"
+                )
             lines.append("")
 
-        # Prioritised actions based on severity
         actions = {
             "critical": [
                 "1. IMMEDIATE: Isolate affected host(s) from network.",
@@ -313,7 +308,7 @@ class ThreatIntelService:
                 "5. Open a P1 bridge call and follow IR runbook SOC-IR-001.",
             ],
             "high": [
-                "1. Contain affected host — restrict lateral movement.",
+                "1. Contain affected host - restrict lateral movement.",
                 "2. Reset passwords for involved user accounts.",
                 "3. Alert on-call SOC analyst via PagerDuty.",
                 "4. Collect endpoint telemetry (memory + process list).",
@@ -332,28 +327,25 @@ class ThreatIntelService:
                 "3. Document findings and close if benign.",
             ],
         }
-        sev_key = severity if severity in actions else "low"
+        severity_key = severity if severity in actions else "low"
         lines.append("Recommended Actions:")
-        lines.extend(actions[sev_key])
+        lines.extend(actions[severity_key])
 
         return "\n".join(lines)
 
-    # ── Utility ──────────────────────────────────────────────────────────────
-
     @staticmethod
-    def _indicator_to_dict(ti: ThreatIndicator) -> Dict:
+    def _indicator_to_dict(ti: ThreatIndicator) -> Dict[str, Any]:
         return {
-            "id":          ti.id,
-            "ioc_type":    ti.ioc_type,
-            "value":       ti.value,
+            "id": ti.id,
+            "ioc_type": ti.ioc_type,
+            "value": ti.value,
             "threat_type": ti.threat_type,
-            "severity":    ti.severity,
-            "confidence":  ti.confidence,
+            "severity": ti.severity,
+            "confidence": ti.confidence,
             "feed_source": ti.feed_source,
             "description": ti.description,
-            "tags":        ti.tags or [],
+            "tags": ti.tags or [],
         }
 
 
-# Module-level singleton
 threat_intel = ThreatIntelService()

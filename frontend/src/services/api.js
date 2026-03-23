@@ -2,14 +2,11 @@
  * Central API client for the AI-SOC frontend.
  *
  * Defaults to relative /api requests so the app works with the Vite proxy
- * in development and with nginx in a production image. An absolute base URL
- * can still be supplied via VITE_API_URL or VITE_BACKEND_URL.
+ * in development and with nginx in a production image. An absolute browser-
+ * reachable base URL can still be supplied via VITE_API_URL when needed.
  */
 
-const RAW_BASE =
-  import.meta.env.VITE_API_URL ||
-  import.meta.env.VITE_BACKEND_URL ||
-  "/api";
+const RAW_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const BASE = RAW_BASE.replace(/\/+$/, "");
 

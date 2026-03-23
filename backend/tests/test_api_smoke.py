@@ -13,6 +13,17 @@ os.environ["DATABASE_URL"] = f"sqlite:///{DB_FILE.as_posix()}"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
+from app.services.database import SessionLocal, init_db  # noqa: E402
+from app.services.threat_intel import ThreatIntelService  # noqa: E402
+
+
+def setUpModule():
+    init_db()
+
+
+def tearDownModule():
+    if DB_FILE.exists():
+        DB_FILE.unlink()
 
 
 class ApiSmokeTests(unittest.TestCase):
@@ -23,8 +34,6 @@ class ApiSmokeTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
-        if DB_FILE.exists():
-            DB_FILE.unlink()
 
     def test_health_endpoint(self):
         response = self.client.get("/health")
@@ -75,6 +84,35 @@ class ApiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("response", response.json())
+
+
+class ThreatIntelCacheTests(unittest.TestCase):
+    def test_cached_indicator_survives_session_commit(self):
+        service = ThreatIntelService()
+
+        db = SessionLocal()
+        try:
+            service.load_from_file(db)
+        finally:
+            db.close()
+
+        db = SessionLocal()
+        try:
+            matches = service.correlate_log(
+                db,
+                {
+                    "ip_src": "203.0.113.88",
+                    "ip_dst": "10.0.1.5",
+                    "user": "admin",
+                    "raw_data": {},
+                },
+            )
+        finally:
+            db.close()
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["value"], "203.0.113.88")
+        self.assertEqual(matches[0]["ioc_type"], "ip")
 
 
 if __name__ == "__main__":
